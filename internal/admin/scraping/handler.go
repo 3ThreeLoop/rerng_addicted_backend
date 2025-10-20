@@ -139,8 +139,12 @@ func (sc *ScrapingHandler) GetDeepDetail(c *fiber.Ctx) error {
 		// Do actual scraping (real work)
 		resp, err := scrapingService.GetDeepDetail(key)
 		if err != nil {
-			msg := translate(err.Err.Error(), nil)
-			fmt.Fprintf(w, "data: %s\n\n", msg)
+			result, _ := json.Marshal(response.NewResponseError(
+				translate(err.MessageID, nil),
+				-2001,
+				fmt.Errorf("%s", translate(err.Err.Error(), nil)),
+			))
+			fmt.Fprintf(w, "data: %s\n\n", string(result))
 			fmt.Fprintf(w, "event: done\ndata: error\n\n")
 			w.Flush()
 			return

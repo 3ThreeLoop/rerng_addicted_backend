@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"rerng_addicted_api/internal/front/auth"
+	"rerng_addicted_api/internal/admin/auth"
 	types "rerng_addicted_api/pkg/model"
 	"rerng_addicted_api/pkg/utils"
 	"strings"
@@ -101,6 +101,8 @@ import (
 // 	})
 // }
 
+
+// for user
 func NewJwtMiddleware(DBPool *sqlx.DB) fiber.Handler {
 	_ = godotenv.Load()
 	secretKey := os.Getenv("JWT_SECRET_KEY")
@@ -133,7 +135,7 @@ func NewJwtMiddleware(DBPool *sqlx.DB) fiber.Handler {
 			}
 
 			pclaim := token.Claims.(jwt.MapClaims)
-			if err := handlePlayerContext(c, pclaim, DBPool); err != nil {
+			if err := handleUserContext(c, pclaim, DBPool); err != nil {
 				return err
 			}
 
@@ -167,7 +169,7 @@ func NewJwtMiddleware(DBPool *sqlx.DB) fiber.Handler {
 		}
 
 		pclaim := token.Claims.(jwt.MapClaims)
-		if err := handlePlayerContext(c, pclaim, DBPool); err != nil {
+		if err := handleUserContext(c, pclaim, DBPool); err != nil {
 			return err
 		}
 
@@ -176,7 +178,7 @@ func NewJwtMiddleware(DBPool *sqlx.DB) fiber.Handler {
 }
 
 // helper function to handle player context creation and session validation
-func handlePlayerContext(c *fiber.Ctx, pclaim jwt.MapClaims, DBPool *sqlx.DB) error {
+func handleUserContext(c *fiber.Ctx, pclaim jwt.MapClaims, DBPool *sqlx.DB) error {
 	// get user_uuid from claims
 	user_uuid, ok := pclaim["user_uuid"].(string)
 	if !ok || user_uuid == "" {
