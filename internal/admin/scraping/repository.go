@@ -16,10 +16,12 @@ import (
 	"sync"
 	"time"
 
+	"github.com/fatih/color"
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
 	"github.com/go-rod/rod/lib/proto"
 	"github.com/jmoiron/sqlx"
+	"github.com/schollz/progressbar/v3"
 )
 
 type ScrapingRepo interface {
@@ -205,9 +207,7 @@ func (sc *ScrapingRepoImpl) GetDeepDetail(key string) (*SeriesDeepDetailsRespons
 
 	// launch Rod browser
 	// use browser to inspect network work from episode link
-	path := "/usr/bin/google-chrome-stable"
 	l := launcher.New().
-		Bin(path).
 		Headless(true).
 		NoSandbox(true).
 		MustLaunch()
@@ -329,6 +329,155 @@ func (sc *ScrapingRepoImpl) GetDeepDetail(key string) (*SeriesDeepDetailsRespons
 			serie_deep_detail,
 		},
 	}, nil
+}
+
+func (sc *ScrapingRepoImpl) Seed() {
+	series_key := []int{
+		// korean drama
+		975, 10124, 3749, 7555, 4596, //41, 5043, 5941, 124, 126,
+
+		// chinese drama
+		//10826, 8316, 6158, 9148, 773, 9579, 7949, 7628, 10958, 7532,
+
+		// hollywood
+		//11698, 11764, 11694, 11739, 11521, 11526, 11706, 11705, 11674, 11652,
+	}
+
+	var series_deep_detail []SerieDeepDetail
+
+	// 🌱 Initialize progress bar
+	bar := progressbar.NewOptions(len(series_key),
+		progressbar.OptionSetDescription("Scraping series..."),
+		progressbar.OptionShowCount(),
+		progressbar.OptionSetWidth(30),
+		progressbar.OptionShowElapsedTimeOnFinish(),
+		progressbar.OptionSetTheme(progressbar.Theme{
+			Saucer:        "█",
+			SaucerHead:    ">",
+			SaucerPadding: " ",
+			BarStart:      "[",
+			BarEnd:        "]",
+		}),
+	)
+
+	start := time.Now()
+	success := 0
+	fail := 0
+
+	for _, key := range series_key {
+		resp, err := sc.GetDeepDetail(fmt.Sprintf("%d", key))
+		if err != nil {
+			color.Red("❌ Failed scraping series %d: %v", key, err)
+			fail++
+			bar.Add(1)
+			continue
+		}
+		success++
+		bar.Add(1)
+		color.Green("✅ Scraped series ID: %d (%d episodes)", key, len(resp.SeriesDeepDetails))
+		series_deep_detail = append(series_deep_detail, resp.SeriesDeepDetails...)
+	}
+
+	// Begin DB transaction
+	tx, err := sc.DBPool.Beginx()
+	if err != nil {
+		color.Red("❌ Failed to start transaction: %v", err)
+		return
+	}
+
+	color.Yellow("\n💾 Inserting data into database...")
+
+	insertBar := progressbar.NewOptions(len(series_deep_detail),
+		progressbar.OptionSetDescription("Inserting series..."),
+		progressbar.OptionSetWidth(30),
+		progressbar.OptionSetTheme(progressbar.Theme{
+			Saucer:        "█",
+			SaucerHead:    ">",
+			SaucerPadding: " ",
+			BarStart:      "[",
+			BarEnd:        "]",
+		}),
+	)
+
+	for _, serie := range series_deep_detail {
+		_, err := tx.NamedExec(`
+			INSERT INTO series 
+				(id, title, description, release_date, trailer, country, status, type, next_ep_date_id,
+				episodes_count, label, favorite_id, thumbnail)
+			VALUES 
+				(:id, :title, :description, :release_date, :trailer, :country, :status, :type, :next_ep_date_id,
+				:episodes_count, :label, :favorite_id, :thumbnail)
+			ON CONFLICT (id) DO NOTHING
+		`, map[string]interface{}{
+			"id":              serie.ID,
+			"title":           serie.Title,
+			"description":     serie.Description,
+			"release_date":    serie.ReleaseDate,
+			"trailer":         serie.Trailer,
+			"country":         serie.Country,
+			"status":          serie.Status,
+			"type":            serie.Type,
+			"next_ep_date_id": serie.NextEpDateID,
+			"episodes_count":  serie.EpisodesCount,
+			"label":           serie.Label,
+			"favorite_id":     serie.FavoriteID,
+			"thumbnail":       serie.Thumbnail,
+		})
+
+		if err != nil {
+			color.Red("❌ [line 430] Failed to insert series %d: %v", serie.ID, err)
+			tx.Rollback()
+			return
+		}
+
+		for _, ep := range serie.Episodes {
+			_, err := tx.NamedExec(`
+				INSERT INTO episodes (id, series_id, number, sub, src)
+					VALUES (:id, :series_id, :number, :sub, :src)
+				ON CONFLICT (id) DO NOTHING
+			`, map[string]interface{}{
+				"id":        ep.ID,
+				"series_id": serie.ID,
+				"number":    ep.Number,
+				"sub":       ep.Sub,
+				"src":       ep.Source,
+			})
+			if err != nil {
+				color.Red("❌[line 448] Failed inserting episode %d of series %d: %v", ep.ID, serie.ID, err)
+				tx.Rollback()
+				return
+			}
+
+			for _, sub := range ep.Subtitles {
+				_, err := tx.NamedExec(`
+					INSERT INTO subtitles (episode_id, src, label, lang, is_default)
+					VALUES (:episode_id, :src, :label, :lang, :is_default)
+				`, map[string]interface{}{
+					"episode_id": ep.ID,
+					"src":        sub.Src,
+					"label":      sub.Label,
+					"lang":       sub.Lang,
+					"is_default": sub.Default,
+				})
+				if err != nil {
+					color.Red("❌ [line 465] Failed inserting subtitle for episode %d: %v", ep.ID, err)
+					tx.Rollback()
+					return
+				}
+			}
+		}
+		insertBar.Add(1)
+	}
+
+	if err := tx.Commit(); err != nil {
+		color.Red("❌ Transaction commit failed: %v", err)
+		return
+	}
+
+	duration := time.Since(start)
+	color.Cyan("\n🎬 Seeding complete in %v", duration)
+	color.Green("✅ Scraped: %d | Failed: %d", success, fail)
+	color.Yellow("💾 Series inserted: %d", len(series_deep_detail))
 }
 
 func slugify(title string) string {

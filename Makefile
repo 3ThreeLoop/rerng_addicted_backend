@@ -35,3 +35,12 @@ force:
 create:
 	@read -p "Migration name: " name; \
 	goose create $$name sql -dir $(MIGRATIONS_DIR)
+
+# Reset DB
+reset:
+	goose -dir $(MIGRATIONS_DIR) postgres "$(DATABASE_URL)" reset
+
+# Run Seeder
+seed:
+	@echo "🌱 Running database seeder..."
+	@DATABASE_URL=$(DATABASE_URL) go run ./db/postgresql/seed/main/main.go
