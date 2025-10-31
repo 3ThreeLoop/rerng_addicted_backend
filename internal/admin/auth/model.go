@@ -17,7 +17,7 @@ type LoginRequest struct {
 func (au *LoginRequest) Bind(c *fiber.Ctx, v *utils.Validator) error {
 	if err := c.BodyParser(au); err != nil {
 		custom_log.NewCustomLog("login_failed", err.Error(), "error")
-		return fmt.Errorf(utils.Translate("invalid_body", nil, c))
+		return fmt.Errorf("%s", utils.Translate("invalid_body", nil, c))
 	}
 
 	if err := v.Validate(au, c); err != nil {

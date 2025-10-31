@@ -14,6 +14,8 @@ CREATE TABLE IF NOT EXISTS tbl_series (
     favorite_id BIGINT DEFAULT 0,
     thumbnail VARCHAR(500),
 
+    status_id INTEGER NOT NULL DEFAULT 1,
+    "order" INTEGER DEFAULT 1,
     created_at TIMESTAMP DEFAULT NOW(),
     created_by BIGINT,
     updated_at TIMESTAMP,

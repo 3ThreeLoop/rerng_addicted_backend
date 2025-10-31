@@ -9,6 +9,7 @@ import (
 	custom_log "rerng_addicted_api/pkg/logs"
 	types "rerng_addicted_api/pkg/model"
 	"rerng_addicted_api/pkg/utils"
+	"strconv"
 	"strings"
 	"time"
 
@@ -61,7 +62,7 @@ func (sc *ScrapingHandler) Search(c *fiber.Ctx) error {
 	)
 }
 
-func (sc *ScrapingHandler) GetDetail(c *fiber.Ctx) error {
+func (sc *ScrapingHandler) ViewDetail(c *fiber.Ctx) error {
 	key := c.Params("key")
 	if strings.TrimSpace(key) == "" {
 		return c.Status(http.StatusBadRequest).JSON(
@@ -73,7 +74,7 @@ func (sc *ScrapingHandler) GetDetail(c *fiber.Ctx) error {
 		)
 	}
 
-	resp, err := sc.ScrapingService(c).GetDetail(key)
+	resp, err := sc.ScrapingService(c).ViewDetail(key)
 	if err != nil {
 		return c.Status(http.StatusBadRequest).JSON(
 			response.NewResponseError(
@@ -93,7 +94,7 @@ func (sc *ScrapingHandler) GetDetail(c *fiber.Ctx) error {
 	)
 }
 
-func (sc *ScrapingHandler) GetDeepDetail(c *fiber.Ctx) error {
+func (sc *ScrapingHandler) GetDetail(c *fiber.Ctx) error {
 	key := c.Params("key")
 	if strings.TrimSpace(key) == "" {
 		return c.Status(http.StatusBadRequest).JSON(
@@ -137,7 +138,7 @@ func (sc *ScrapingHandler) GetDeepDetail(c *fiber.Ctx) error {
 		}
 
 		// Do actual scraping (real work)
-		resp, err := scrapingService.GetDeepDetail(key)
+		resp, err := scrapingService.GetDetail(key)
 		if err != nil {
 			result, _ := json.Marshal(response.NewResponseError(
 				translate(err.MessageID, nil),
@@ -166,4 +167,62 @@ func (sc *ScrapingHandler) GetDeepDetail(c *fiber.Ctx) error {
 	})
 
 	return nil
+}
+
+func (sc *ScrapingHandler) GetEpisode(c *fiber.Ctx) error {
+	key_str := c.Params("key")
+	ep_num_Str := c.Params("ep")
+
+	fmt.Println("hello", key_str, ep_num_Str)
+
+	if strings.TrimSpace(key_str) == "" || strings.TrimSpace(ep_num_Str) == "" {
+		return c.Status(http.StatusBadRequest).JSON(
+			response.NewResponseError(
+				utils.Translate("scraping_failed", nil, c),
+				-2002,
+				fmt.Errorf("%s", utils.Translate("need_key_or_ep", nil, c)),
+			),
+		)
+	}
+
+	key, err_con := strconv.Atoi(key_str)
+	if err_con != nil {
+		return c.Status(http.StatusBadRequest).JSON(
+			response.NewResponseError(
+				utils.Translate("scraping_failed", nil, c),
+				-2002,
+				fmt.Errorf("invalid key: %s", key_str),
+			),
+		)
+	}
+
+	ep_num, err_con := strconv.Atoi(ep_num_Str)
+	if err_con != nil {
+		return c.Status(http.StatusBadRequest).JSON(
+			response.NewResponseError(
+				utils.Translate("scraping_failed", nil, c),
+				-2002,
+				fmt.Errorf("invalid episode number: %s", ep_num_Str),
+			),
+		)
+	}
+
+	resp, err := sc.ScrapingService(c).GetEpisodes(key, ep_num)
+	if err != nil {
+		return c.Status(http.StatusInternalServerError).JSON(
+			response.NewResponseError(
+				utils.Translate(err.MessageID, nil, c),
+				-2002,
+				fmt.Errorf("%s", utils.Translate(err.Err.Error(), nil, c)),
+			),
+		)
+	}
+
+	return c.JSON(
+		response.NewResponse(
+			utils.Translate("scraping_success", nil, c),
+			2002,
+			resp,
+		),
+	)
 }

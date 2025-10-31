@@ -1,6 +1,7 @@
 package scraping
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -8,6 +9,7 @@ import (
 	"net/url"
 	"os"
 	"regexp"
+	"rerng_addicted_api/internal/admin/serie"
 	custom_log "rerng_addicted_api/pkg/logs"
 	types "rerng_addicted_api/pkg/model"
 	"rerng_addicted_api/pkg/responses"
@@ -16,18 +18,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/fatih/color"
 	"github.com/go-rod/rod"
 	"github.com/go-rod/rod/lib/launcher"
-	"github.com/go-rod/rod/lib/proto"
 	"github.com/jmoiron/sqlx"
-	"github.com/schollz/progressbar/v3"
 )
 
 type ScrapingRepo interface {
 	Search(keyword string) (*SeriesResponse, *responses.ErrorResponse)
-	GetDetail(key string) (*SeriesDetailsResponse, *responses.ErrorResponse)
+	ViewDetail(key string) (*SeriesDetailsResponse, *responses.ErrorResponse)
 	GetDeepDetail(key string) (*SeriesDeepDetailsResponse, *responses.ErrorResponse)
+	GetEpisodes(key int, ep_num int) (*EpisodesResponse, *responses.ErrorResponse)
+	Seed() []serie.SerieDeepDetail
 }
 
 type ScrapingRepoImpl struct {
@@ -85,12 +86,24 @@ func (sc *ScrapingRepoImpl) Search(keyword string) (*SeriesResponse, *responses.
 	body, _ := io.ReadAll(resp_api.Body)
 
 	// parse JSON response
-	var series []Serie
+	var series_json []serie.SerieJSON
 	// fmt.Println("body : ", string(body))
-	if err := json.Unmarshal(body, &series); err != nil {
+	if err := json.Unmarshal(body, &series_json); err != nil {
 		custom_log.NewCustomLog("scraping_failed", err.Error(), "error")
 		err_msg := &responses.ErrorResponse{}
 		return nil, err_msg.NewErrorResponse("scraping_failed", fmt.Errorf("parse_data_failed"))
+	}
+
+	series := make([]serie.Serie, len(series_json))
+	for i, s := range series_json {
+		series[i] = serie.Serie{
+			ID:            s.ID,
+			Title:         s.Title,
+			EpisodesCount: s.EpisodesCount,
+			Label:         s.Label,
+			FavoriteID:    s.FavoriteID,
+			Thumbnail:     s.Thumbnail,
+		}
 	}
 
 	return &SeriesResponse{
@@ -98,7 +111,7 @@ func (sc *ScrapingRepoImpl) Search(keyword string) (*SeriesResponse, *responses.
 	}, nil
 }
 
-func (sc *ScrapingRepoImpl) GetDetail(key string) (*SeriesDetailsResponse, *responses.ErrorResponse) {
+func (sc *ScrapingRepoImpl) ViewDetail(key string) (*SeriesDetailsResponse, *responses.ErrorResponse) {
 	// visit main page to get cookies
 	main_url := "https://kisskh.co/"
 	client := &http.Client{
@@ -123,8 +136,6 @@ func (sc *ScrapingRepoImpl) GetDetail(key string) (*SeriesDetailsResponse, *resp
 		cookie_str += ck.Name + "=" + ck.Value + "; "
 	}
 
-	fmt.Println("heloooooo")
-
 	// call search API with cookies
 	api_url := fmt.Sprintf("https://kisskh.co/api/DramaList/Drama/%s", key)
 	req_api, _ := http.NewRequest("GET", api_url, nil)
@@ -143,341 +154,813 @@ func (sc *ScrapingRepoImpl) GetDetail(key string) (*SeriesDetailsResponse, *resp
 	body, _ := io.ReadAll(resp_api.Body)
 
 	// parse JSON response
-	var serie_detail SerieDetail
-	fmt.Println("body : ", string(body))
-	if err := json.Unmarshal(body, &serie_detail); err != nil {
+	var serie_detail_json serie.SerieDetailJSON
+	// fmt.Println("body : ", string(body))
+	if err := json.Unmarshal(body, &serie_detail_json); err != nil {
 		custom_log.NewCustomLog("scraping_failed", err.Error(), "error")
 		err_msg := &responses.ErrorResponse{}
 		return nil, err_msg.NewErrorResponse("scraping_failed", fmt.Errorf("parse_data_failed"))
 	}
 
+	episodes := make([]serie.Episode, len(serie_detail_json.Episodes))
+	for i, ep := range serie_detail_json.Episodes {
+		episodes[i] = serie.Episode{
+			ID:     ep.ID,
+			Number: ep.Number,
+			Sub:    ep.Sub,
+		}
+	}
+
+	serie_detail := serie.SerieDetail{
+		ID:            serie_detail_json.ID,
+		Title:         serie_detail_json.Title,
+		Description:   serie_detail_json.Description,
+		ReleaseDate:   serie_detail_json.ReleaseDate,
+		Trailer:       serie_detail_json.Trailer,
+		Country:       serie_detail_json.Country,
+		Status:        serie_detail_json.Status,
+		Type:          serie_detail_json.Type,
+		NextEpDateID:  serie_detail_json.NextEpDateID,
+		Episodes:      episodes,
+		EpisodesCount: serie_detail_json.EpisodesCount,
+		Label:         serie_detail_json.Label,
+		FavoriteID:    serie_detail_json.FavoriteID,
+		Thumbnail:     serie_detail_json.Thumbnail,
+	}
+
 	return &SeriesDetailsResponse{
-		SeriesDetails: []SerieDetail{
+		SeriesDetails: []serie.SerieDetail{
 			serie_detail,
 		},
 	}, nil
 }
 
-func (sc *ScrapingRepoImpl) GetDeepDetail(key string) (*SeriesDeepDetailsResponse, *responses.ErrorResponse) {
-	// get main page cookies
-	// go to original website to get cookies
+func (sc *ScrapingRepoImpl) GetDetail(key string) (*SeriesDeepDetailsResponse, *responses.ErrorResponse) {
 	main_url := "https://kisskh.co/"
-	client := &http.Client{}
+	client := &http.Client{Timeout: 15 * time.Second}
+
+	// get cookies
 	req_main, _ := http.NewRequest("GET", main_url, nil)
 	req_main.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/115.0 Safari/537.36")
 
 	resp_main, err := client.Do(req_main)
 	if err != nil {
 		custom_log.NewCustomLog("scraping_failed", err.Error(), "error")
-		err_msg := &responses.ErrorResponse{}
-		return nil, err_msg.NewErrorResponse("scraping_failed", fmt.Errorf("original_source_error"))
+		return nil, (&responses.ErrorResponse{}).NewErrorResponse("scraping_failed", fmt.Errorf("original_source_error"))
 	}
 	defer resp_main.Body.Close()
 
-	// get cookies from response
-	cookies := resp_main.Cookies()
-	cookie_str := ""
-	for _, ck := range cookies {
-		cookie_str += ck.Name + "=" + ck.Value + "; "
+	var cookie_str strings.Builder
+	for _, ck := range resp_main.Cookies() {
+		cookie_str.WriteString(fmt.Sprintf("%s=%s; ", ck.Name, ck.Value))
 	}
 
-	// get drama details via API
-	api_url := fmt.Sprintf("https://kisskh.co/api/DramaList/Drama/%s", key)
-	req_api, _ := http.NewRequest("GET", api_url, nil)
-	req_api.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/115.0 Safari/537.36")
+	// fetch series info
+	apiURL := fmt.Sprintf("https://kisskh.co/api/DramaList/Drama/%s", key)
+	req_api, _ := http.NewRequest("GET", apiURL, nil)
+	req_api.Header.Set("User-Agent", req_main.Header.Get("User-Agent"))
 	req_api.Header.Set("Referer", main_url)
-	req_api.Header.Set("Cookie", cookie_str)
+	req_api.Header.Set("Cookie", cookie_str.String())
 
 	resp_api, err := client.Do(req_api)
 	if err != nil {
 		custom_log.NewCustomLog("scraping_failed", err.Error(), "error")
-		err_msg := &responses.ErrorResponse{}
-		return nil, err_msg.NewErrorResponse("scraping_failed", fmt.Errorf("fetch_api_failed"))
+		return nil, (&responses.ErrorResponse{}).NewErrorResponse("scraping_failed", fmt.Errorf("fetch_api_failed"))
 	}
 	defer resp_api.Body.Close()
 
-	// read response body to unmarshal response body to the struct
 	body, _ := io.ReadAll(resp_api.Body)
-	var serie_deep_detail SerieDeepDetail
-	if err := json.Unmarshal(body, &serie_deep_detail); err != nil {
+	var serie_detail_json serie.SerieDeepDetailJSON
+	if err := json.Unmarshal(body, &serie_detail_json); err != nil {
 		custom_log.NewCustomLog("scraping_failed", err.Error(), "error")
-		err_msg := &responses.ErrorResponse{}
-		return nil, err_msg.NewErrorResponse("scraping_failed", fmt.Errorf("parse_data_failed"))
+		return nil, (&responses.ErrorResponse{}).NewErrorResponse("scraping_failed", fmt.Errorf("parse_data_failed"))
 	}
 
-	// launch Rod browser
-	// use browser to inspect network work from episode link
-	l := launcher.New().
+	episodes := make([]serie.EpisodeDeep, len(serie_detail_json.Episodes))
+	for i, ep := range serie_detail_json.Episodes {
+		subtitles := make([]serie.Subtitle, len(ep.Subtitles))
+		for j, sub := range ep.Subtitles {
+			subtitles[j] = serie.Subtitle{
+				Src:     sub.Src,
+				Label:   sub.Label,
+				Lang:    sub.Lang,
+				Default: sub.Default,
+			}
+		}
+
+		episodes[i] = serie.EpisodeDeep{
+			ID:        ep.ID,
+			SeriesID:  ep.SeriesID,
+			Number:    ep.Number,
+			Sub:       ep.Sub,
+			Source:    ep.Source,
+			Subtitles: subtitles,
+		}
+	}
+
+	fmt.Println("release date:", serie_detail_json.ReleaseDate)
+
+	var release_date *time.Time
+	if serie_detail_json.ReleaseDate != "" {
+		parsedTime, err := time.Parse("2006-01-02T15:04:05", serie_detail_json.ReleaseDate)
+		if err == nil {
+			release_date = &parsedTime
+		} else {
+			custom_log.NewCustomLog("date_parse_failed", err.Error(), "warning")
+		}
+	}
+
+	serie_detail := serie.SerieDeepDetail{
+		ID:            serie_detail_json.ID,
+		Title:         serie_detail_json.Title,
+		Description:   serie_detail_json.Description,
+		ReleaseDate:   release_date,
+		Trailer:       serie_detail_json.Trailer,
+		Country:       serie_detail_json.Country,
+		Status:        serie_detail_json.Status,
+		Type:          serie_detail_json.Type,
+		NextEpDateID:  serie_detail_json.NextEpDateID,
+		Episodes:      episodes,
+		EpisodesCount: serie_detail_json.EpisodesCount,
+		Label:         serie_detail_json.Label,
+		FavoriteID:    serie_detail_json.FavoriteID,
+		Thumbnail:     serie_detail_json.Thumbnail,
+	}
+
+	// launch optimized Rod browser
+	path := "/usr/bin/google-chrome-stable"
+	launcher_instance := launcher.New().
+		Bin(path).
 		Headless(true).
 		NoSandbox(true).
+		Set("disable-gpu").
+		Set("disable-sync").
+		Set("disable-background-networking").
+		Set("disable-default-apps").
 		MustLaunch()
 
-	browser := rod.New().ControlURL(l).MustConnect()
+	browser := rod.New().ControlURL(launcher_instance).MustConnect()
 	defer browser.MustClose()
 
-	// parallel scraping with worker pool with limit concurrency
-	var wg sync.WaitGroup
-	sem := make(chan struct{}, 5)
+	incognito := browser.MustIncognito()
 
-	for i := range serie_deep_detail.Episodes {
+	// create page pool (reuse pages)
+	concurrency := 6
+	page_pool := make(chan *rod.Page, concurrency)
+	for i := 0; i < concurrency; i++ {
+		page_pool <- incognito.MustPage()
+	}
+
+	host := os.Getenv("API_HOST")
+	port := utils.GetenvInt("API_PORT", 8585)
+	proxy_base := fmt.Sprintf("http://%s:%d", host, port)
+
+	// inject sniffer once per page
+	const sniff_js = `() => {
+			if (window.__scrape_sniffer_ready) return;
+			window.__scrape_sniffer_ready = true;
+			window.__scrape_sniffer_results = [];
+
+			const push_result = (t, info) => {
+				try {
+					window.__scrape_sniffer_results.push({ t, info, ts: Date.now() });
+					if (t === 'xhr_video' || t === 'video_element') window.__video_found = info;
+					if (t === 'xhr_sub') window.__sub_found = info;
+				} catch (e) {}
+			};
+
+			// Hook XMLHttpRequest
+			const orig_open = XMLHttpRequest.prototype.open;
+			const orig_send = XMLHttpRequest.prototype.send;
+			XMLHttpRequest.prototype.open = function(m, u) { this.__url = u; return orig_open.apply(this, arguments); };
+			XMLHttpRequest.prototype.send = function() {
+				const url = this.__url || "";
+				this.addEventListener('load', function() {
+					const type = this.getResponseHeader('content-type') || "";
+					if (url.includes('.m3u8') || url.includes('/hls') || type.includes('application/vnd.apple.mpegurl'))
+						push_result('xhr_video', { url });
+					else if (url.includes('/api/Sub/'))
+						push_result('xhr_sub', { url });
+				});
+				return orig_send.apply(this, arguments);
+			};
+
+			// Hook fetch
+			const orig_fetch = window.fetch;
+			window.fetch = async (i, init) => {
+				const req_url = typeof i === 'string' ? i : (i && i.url) || "";
+				try {
+					if (req_url && (req_url.includes('.m3u8') || req_url.includes('/hls')))
+						push_result('xhr_video', { url: req_url });
+				} catch (e) {}
+				const resp = await orig_fetch(i, init);
+				try {
+					const type = resp && resp.headers && resp.headers.get ? (resp.headers.get('content-type') || "") : "";
+					if (type.includes('application/vnd.apple.mpegurl'))
+						push_result('xhr_video', { url: req_url });
+				} catch (e) {}
+				return resp;
+			};
+
+			// Watch <video>
+			const watch_video = v => {
+				if (!v || v.__watched) return;
+				v.__watched = true;
+				const report = () => {
+					const s = v.currentSrc || v.src || "";
+					if (s.includes('.mp4') || s.includes('.m3u8')) push_result('video_element', { url: s });
+					else if (s.startsWith('blob:')) push_result('video_blob', { url: s });
+				};
+				report();
+				v.addEventListener('loadedmetadata', report);
+				new MutationObserver(report).observe(v, { attributes: true, attributeFilter: ['src'] });
+			};
+			document.querySelectorAll('video').forEach(watch_video);
+
+			// Watch <iframe> for src OR data-src attributes (countdown or lazyload)
+			const isPlayerOrCountdown = src => {
+				if (!src || typeof src !== 'string') return false;
+				const s = src.toLowerCase();
+				return s.includes('countdown') || s.includes('tickcounter') || s.includes('/player/') || s.includes('.m3u8') || s.includes('/hls');
+			};
+
+			const normalizeURL = u => {
+				if (!u) return '';
+				if (u.startsWith('//')) return 'https:' + u;
+				return u;
+			};
+
+			const watch_iframe = ifr => {
+				if (!ifr || ifr.__iframe_watched) return;
+				ifr.__iframe_watched = true;
+				const report = () => {
+					try {
+						let src = ifr.getAttribute('src') || "";
+						let dataSrc = ifr.getAttribute('data-src') || "";
+						let finalSrc = src || dataSrc;
+						finalSrc = normalizeURL(finalSrc);
+						if (isPlayerOrCountdown(finalSrc)) {
+							push_result('video_element', { url: finalSrc });
+						}
+					} catch (e) {}
+				};
+				report();
+
+				// Watch for src or data-src changes
+				new MutationObserver(() => report()).observe(ifr, { attributes: true, attributeFilter: ['src', 'data-src'] });
+			};
+
+			// Existing iframes
+			document.querySelectorAll('iframe').forEach(watch_iframe);
+
+			// Watch DOM changes
+			new MutationObserver(muts => {
+				muts.forEach(m => {
+					m.addedNodes.forEach(n => {
+						try {
+							const tag = (n && n.tagName) ? n.tagName.toUpperCase() : '';
+							if (tag === 'VIDEO') watch_video(n);
+							if (tag === 'IFRAME') watch_iframe(n);
+							if (n.querySelectorAll) {
+								n.querySelectorAll('video').forEach(watch_video);
+								n.querySelectorAll('iframe').forEach(watch_iframe);
+							}
+						} catch (e) {}
+					});
+				});
+			}).observe(document.body, { childList: true, subtree: true });
+
+			window.waitForVideo = new Promise(r => {
+				const check = () => {
+					if (window.__video_found) return r(window.__video_found);
+					try {
+						for (const it of window.__scrape_sniffer_results) {
+							if (it && (it.t === 'video_element' || it.t === 'xhr_video')) {
+								window.__video_found = it.info;
+								return r(it.info);
+							}
+						}
+					} catch (e) {}
+					setTimeout(check, 500);
+				};
+				check();
+			});
+		}`
+
+	var wg sync.WaitGroup
+	for i := range serie_detail.Episodes {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			sem <- struct{}{}
-			defer func() { <-sem }()
+			page := <-page_pool
+			defer func() { page_pool <- page }()
 
-			ep := serie_deep_detail.Episodes[i]
-			fmt.Println("===============================================================")
-			fmt.Println("Processing Episode:", ep.Number)
+			ep := &serie_detail.Episodes[i]
+			fmt.Println("🎬 Processing Episode:", ep.Number)
 
-			page := browser.MustPage()
-			_ = proto.NetworkSetCacheDisabled{CacheDisabled: true}.Call(page)
-			_ = proto.NetworkEnable{}.Call(page)
+			// define scraping logic for a single attempt
+			try_scrape := func() (string, bool) {
+				ep_url := fmt.Sprintf(
+					"https://kisskh.co/Drama/%s/Episode-%d?id=%d&ep=%d&page=0&pageSize=100",
+					slugify(serie_detail.Title),
+					int(ep.Number),
+					serie_detail.ID,
+					ep.ID,
+				)
 
-			epURL := fmt.Sprintf(
-				"https://kisskh.co/Drama/%s/Episode-%d?id=%d&ep=%d&page=0&pageSize=100",
-				slugify(serie_deep_detail.Title), int(ep.Number), serie_deep_detail.ID, ep.ID,
-			)
+				page.MustNavigate(ep_url).MustWaitLoad()
+				page.Eval(sniff_js)
+				page.Eval(`() => { const v = document.querySelector('video'); if (v) { v.muted = true; v.play && v.play().catch(()=>{}); } }`)
 
-			fmt.Println("Navigating to:", epURL)
-			page.MustNavigate(epURL).MustWaitLoad()
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				defer cancel()
 
-			deadline := time.After(25 * time.Second)
-
-		loop: // 👈 label to break outer loop
-			for {
-				evt := &proto.NetworkResponseReceived{}
-				wait := page.WaitEvent(evt)
-
-				done := make(chan struct{})
+				ch := make(chan string, 1)
 				go func() {
-					wait()
-					done <- struct{}{}
+					val, err := page.Eval(`() => window.waitForVideo`)
+					if err != nil {
+						fmt.Println("Eval error:", err)
+						return
+					}
+
+					fmt.Println("value val: ", val)
+
+					// convert gson.JSON to map
+					obj := val.Value.Map()
+					if url_json, ok := obj["url"]; ok {
+						url_str := url_json.Str()
+						if url_str != "" {
+							fmt.Println("✅ Video URL:", url_str)
+							ch <- url_str
+						}
+					}
 				}()
 
 				select {
-				case <-done:
-					url_str := evt.Response.URL
-					mime := evt.Response.MIMEType
+				case video_url := <-ch:
+					fmt.Printf("✅ Found video for ep %.0f: %s\n", ep.Number, video_url)
+					return video_url, true
 
-					// prepare proxy base
-					host := os.Getenv("API_HOST")
-					port := utils.GetenvInt("API_PORT", 8585)
-					proxy_base := fmt.Sprintf("http://%s:%d", host, port)
-
-					// capture video
-					if strings.Contains(url_str, ".m3u8") || mime == "application/vnd.apple.mpegurl" ||
-						strings.Contains(url_str, ".mp4") || mime == "video/mp4" {
-
-						if strings.Contains(url_str, ".m3u8") || mime == "application/vnd.apple.mpegurl" {
-							trimmed := strings.TrimPrefix(url_str, "https://")
-							trimmed = strings.TrimPrefix(trimmed, "http://")
-							serie_deep_detail.Episodes[i].Source = fmt.Sprintf("%s/m3u8/%s", proxy_base, trimmed)
-						} else if strings.Contains(url_str, ".mp4") || mime == "video/mp4" {
-							encoded := url.QueryEscape(url_str)
-							serie_deep_detail.Episodes[i].Source = fmt.Sprintf("%s/mp4?url=%s", proxy_base, encoded)
-						}
-
-						fmt.Printf("✅ Found video for ep %.0f: %s\n", ep.Number, serie_deep_detail.Episodes[i].Source)
-					}
-
-					// capture subtitles
-					sub_url_contains := fmt.Sprintf("/api/Sub/%d", ep.ID)
-					if strings.Contains(url_str, sub_url_contains) {
-						req_sub, _ := http.NewRequest("GET", url_str, nil)
-						req_sub.Header.Set("User-Agent", "Mozilla/5.0")
-						req_sub.Header.Set("Referer", epURL)
-						req_sub.Header.Set("Cookie", cookie_str)
-
-						if resp_sub, err := client.Do(req_sub); err == nil {
-							defer resp_sub.Body.Close()
-							subBody, _ := io.ReadAll(resp_sub.Body)
-
-							var subs []Subtitle
-							if err := json.Unmarshal(subBody, &subs); err == nil {
-								for j, sub := range subs {
-									trimmed := strings.TrimPrefix(sub.Src, "https://")
-									trimmed = strings.TrimPrefix(trimmed, "http://")
-									subs[j].Src = fmt.Sprintf("%s/subtitle/%s", proxy_base, trimmed)
-								}
-
-								serie_deep_detail.Episodes[i].Subtitles = subs
-								fmt.Printf("✅ Parsed %d subtitles for ep %.0f\n", len(subs), ep.Number)
-							}
-						}
-					}
-
-					// exit when both found
-					if serie_deep_detail.Episodes[i].Source != "" && len(serie_deep_detail.Episodes[i].Subtitles) > 0 {
-						break loop
-					}
-
-				case <-deadline:
-					fmt.Println("❌ Timeout for episode", ep.Number)
-					break loop
+				case <-ctx.Done():
+					fmt.Println("⏱ Timeout on episode", ep.Number)
+					return "", false
 				}
 			}
 
-			page.MustClose()
+			// try to scrap up to 3 times
+			var video_url string
+			max_retries := 2
+			for attempt := 0; attempt <= max_retries; attempt++ {
+				url_found, ok := try_scrape()
+				if ok {
+					video_url = url_found
+					break
+				}
+
+				if attempt < max_retries {
+					backoff := time.Duration(2+attempt*3) * time.Second
+					fmt.Printf("🔁 Retrying episode %.0f (attempt %d/%d) after %v...\n", ep.Number, attempt+1, max_retries, backoff)
+
+					// cleanup and reopen fresh page
+					page.MustClose()
+					page = incognito.MustPage()
+
+					time.Sleep(backoff)
+				}
+			}
+
+			if video_url == "" {
+				fmt.Printf("❌ Failed to find video for ep %.0f after retries\n", ep.Number)
+				return
+			}
+
+			//  handle video url type
+			mime := getMimeFromURL(video_url)
+			if strings.Contains(video_url, ".m3u8") || mime == "application/vnd.apple.mpegurl" {
+				trimmed := strings.TrimPrefix(video_url, "https://")
+				trimmed = strings.TrimPrefix(trimmed, "http://")
+				ep.Source = fmt.Sprintf("%s/m3u8/%s", proxy_base, trimmed)
+			} else if strings.Contains(video_url, ".mp4") || mime == "video/mp4" {
+				encoded := url.QueryEscape(video_url)
+				ep.Source = fmt.Sprintf("%s/mp4?url=%s", proxy_base, encoded)
+			} else {
+				ep.Source = video_url
+			}
+
+			// handle subtitle fetching
+			val, err := page.Eval(`() => window.__sub_found ? window.__sub_found.url : null`)
+			if err == nil {
+				sub_url := val.Value.String()
+				if sub_url != "" {
+					full_sub_url := "https://kisskh.co" + sub_url
+					req_sub, _ := http.NewRequest("GET", full_sub_url, nil)
+					req_sub.Header.Set("User-Agent", "Mozilla/5.0")
+					req_sub.Header.Set("Referer", fmt.Sprintf("https://kisskh.co/Drama/%s", slugify(serie_detail.Title)))
+					req_sub.Header.Set("Cookie", cookie_str.String())
+
+					if resp_sub, err := client.Do(req_sub); err == nil {
+						defer resp_sub.Body.Close()
+						sub_body, _ := io.ReadAll(resp_sub.Body)
+						var subs_json []serie.SubtitleJSON
+						if json.Unmarshal(sub_body, &subs_json) == nil {
+							for j := range subs_json {
+								trimmed := strings.TrimPrefix(subs_json[j].Src, "https://")
+								trimmed = strings.TrimPrefix(trimmed, "http://")
+								subs_json[j].Src = fmt.Sprintf("%s/subtitle/%s", proxy_base, trimmed)
+							}
+							subs := make([]serie.Subtitle, len(subs_json))
+							for j, sub := range subs_json {
+								trimmed := strings.TrimPrefix(sub.Src, "https://")
+								trimmed = strings.TrimPrefix(trimmed, "http://")
+								subs[j] = serie.Subtitle{
+									Src:     sub.Src,
+									Label:   sub.Label,
+									Lang:    sub.Lang,
+									Default: sub.Default,
+								}
+							}
+
+							ep.Subtitles = subs
+							fmt.Printf("✅ Parsed %d subtitles for ep %.0f\n", len(subs), ep.Number)
+						}
+					}
+				}
+			}
 		}(i)
 	}
 
 	wg.Wait()
 
 	return &SeriesDeepDetailsResponse{
-		SeriesDeepDetails: []SerieDeepDetail{
-			serie_deep_detail,
+		SeriesDeepDetails: []serie.SerieDeepDetail{serie_detail},
+	}, nil
+}
+
+func (sc *ScrapingRepoImpl) GetEpisodes(key int, ep_num int) (*EpisodesResponse, *responses.ErrorResponse) {
+	main_url := "https://kisskh.co/"
+	client := &http.Client{Timeout: 15 * time.Second}
+
+	// get cookies
+	req_main, _ := http.NewRequest("GET", main_url, nil)
+	req_main.Header.Set("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/115.0 Safari/537.36")
+	resp_main, err := client.Do(req_main)
+	if err != nil {
+		custom_log.NewCustomLog("scraping_failed", err.Error(), "error")
+		return nil, (&responses.ErrorResponse{}).NewErrorResponse("scraping_failed", fmt.Errorf("original_source_error"))
+	}
+	defer resp_main.Body.Close()
+
+	var cookie_str strings.Builder
+	for _, ck := range resp_main.Cookies() {
+		cookie_str.WriteString(fmt.Sprintf("%s=%s; ", ck.Name, ck.Value))
+	}
+
+	// fetch series detail
+	api_url := fmt.Sprintf("https://kisskh.co/api/DramaList/Drama/%d", key)
+	req_api, _ := http.NewRequest("GET", api_url, nil)
+	req_api.Header.Set("User-Agent", req_main.Header.Get("User-Agent"))
+	req_api.Header.Set("Referer", main_url)
+	req_api.Header.Set("Cookie", cookie_str.String())
+
+	resp_api, err := client.Do(req_api)
+	if err != nil {
+		custom_log.NewCustomLog("scraping_failed", err.Error(), "error")
+		return nil, (&responses.ErrorResponse{}).NewErrorResponse("scraping_failed", fmt.Errorf("fetch_api_failed"))
+	}
+	defer resp_api.Body.Close()
+
+	body, _ := io.ReadAll(resp_api.Body)
+	var serie_detail_json serie.SerieDeepDetailJSON
+	if err := json.Unmarshal(body, &serie_detail_json); err != nil {
+		custom_log.NewCustomLog("scraping_failed", err.Error(), "error")
+		return nil, (&responses.ErrorResponse{}).NewErrorResponse("scraping_failed", fmt.Errorf("parse_data_failed"))
+	}
+
+	// find the requested episode
+	var target_ep *serie.EpisodeDeepJSON
+	for _, ep := range serie_detail_json.Episodes {
+		if fmt.Sprintf("%.0f", ep.Number) == fmt.Sprintf("%d", ep_num) {
+			target_ep = &ep
+			break
+		}
+	}
+	if target_ep == nil {
+		return nil, (&responses.ErrorResponse{}).NewErrorResponse("scraping_failed", fmt.Errorf("episode %d not found in series %d", ep_num, key))
+	}
+
+	// setup Rod browser
+	path := "/usr/bin/google-chrome-stable"
+	launcher_instance := launcher.New().
+		Bin(path).
+		Headless(true).
+		NoSandbox(true).
+		Set("disable-gpu").
+		Set("disable-sync").
+		Set("disable-background-networking").
+		Set("disable-default-apps").
+		MustLaunch()
+	browser := rod.New().ControlURL(launcher_instance).MustConnect()
+	defer browser.MustClose()
+
+	incognito := browser.MustIncognito()
+	page := incognito.MustPage()
+
+	// sniffer js
+	const sniff_js = `() => {
+			if (window.__scrape_sniffer_ready) return;
+			window.__scrape_sniffer_ready = true;
+			window.__scrape_sniffer_results = [];
+
+			const push_result = (t, info) => {
+				try {
+					window.__scrape_sniffer_results.push({ t, info, ts: Date.now() });
+					if (t === 'xhr_video' || t === 'video_element') window.__video_found = info;
+					if (t === 'xhr_sub') window.__sub_found = info;
+				} catch (e) {}
+			};
+
+			// Hook XMLHttpRequest
+			const orig_open = XMLHttpRequest.prototype.open;
+			const orig_send = XMLHttpRequest.prototype.send;
+			XMLHttpRequest.prototype.open = function(m, u) { this.__url = u; return orig_open.apply(this, arguments); };
+			XMLHttpRequest.prototype.send = function() {
+				const url = this.__url || "";
+				this.addEventListener('load', function() {
+					const type = this.getResponseHeader('content-type') || "";
+					if (url.includes('.m3u8') || url.includes('/hls') || type.includes('application/vnd.apple.mpegurl'))
+						push_result('xhr_video', { url });
+					else if (url.includes('/api/Sub/'))
+						push_result('xhr_sub', { url });
+				});
+				return orig_send.apply(this, arguments);
+			};
+
+			// Hook fetch
+			const orig_fetch = window.fetch;
+			window.fetch = async (i, init) => {
+				const req_url = typeof i === 'string' ? i : (i && i.url) || "";
+				try {
+					if (req_url && (req_url.includes('.m3u8') || req_url.includes('/hls')))
+						push_result('xhr_video', { url: req_url });
+				} catch (e) {}
+				const resp = await orig_fetch(i, init);
+				try {
+					const type = resp && resp.headers && resp.headers.get ? (resp.headers.get('content-type') || "") : "";
+					if (type.includes('application/vnd.apple.mpegurl'))
+						push_result('xhr_video', { url: req_url });
+				} catch (e) {}
+				return resp;
+			};
+
+			// Watch <video>
+			const watch_video = v => {
+				if (!v || v.__watched) return;
+				v.__watched = true;
+				const report = () => {
+					const s = v.currentSrc || v.src || "";
+					if (s.includes('.mp4') || s.includes('.m3u8')) push_result('video_element', { url: s });
+					else if (s.startsWith('blob:')) push_result('video_blob', { url: s });
+				};
+				report();
+				v.addEventListener('loadedmetadata', report);
+				new MutationObserver(report).observe(v, { attributes: true, attributeFilter: ['src'] });
+			};
+			document.querySelectorAll('video').forEach(watch_video);
+
+			// Watch <iframe> for src OR data-src attributes (countdown or lazyload)
+			const isPlayerOrCountdown = src => {
+				if (!src || typeof src !== 'string') return false;
+				const s = src.toLowerCase();
+				return s.includes('countdown') || s.includes('tickcounter') || s.includes('/player/') || s.includes('.m3u8') || s.includes('/hls');
+			};
+
+			const normalizeURL = u => {
+				if (!u) return '';
+				if (u.startsWith('//')) return 'https:' + u;
+				return u;
+			};
+
+			const watch_iframe = ifr => {
+				if (!ifr || ifr.__iframe_watched) return;
+				ifr.__iframe_watched = true;
+				const report = () => {
+					try {
+						let src = ifr.getAttribute('src') || "";
+						let dataSrc = ifr.getAttribute('data-src') || "";
+						let finalSrc = src || dataSrc;
+						finalSrc = normalizeURL(finalSrc);
+						if (isPlayerOrCountdown(finalSrc)) {
+							push_result('video_element', { url: finalSrc });
+						}
+					} catch (e) {}
+				};
+				report();
+
+				// Watch for src or data-src changes
+				new MutationObserver(() => report()).observe(ifr, { attributes: true, attributeFilter: ['src', 'data-src'] });
+			};
+
+			// Existing iframes
+			document.querySelectorAll('iframe').forEach(watch_iframe);
+
+			// Watch DOM changes
+			new MutationObserver(muts => {
+				muts.forEach(m => {
+					m.addedNodes.forEach(n => {
+						try {
+							const tag = (n && n.tagName) ? n.tagName.toUpperCase() : '';
+							if (tag === 'VIDEO') watch_video(n);
+							if (tag === 'IFRAME') watch_iframe(n);
+							if (n.querySelectorAll) {
+								n.querySelectorAll('video').forEach(watch_video);
+								n.querySelectorAll('iframe').forEach(watch_iframe);
+							}
+						} catch (e) {}
+					});
+				});
+			}).observe(document.body, { childList: true, subtree: true });
+
+			window.waitForVideo = new Promise(r => {
+				const check = () => {
+					if (window.__video_found) return r(window.__video_found);
+					try {
+						for (const it of window.__scrape_sniffer_results) {
+							if (it && (it.t === 'video_element' || it.t === 'xhr_video')) {
+								window.__video_found = it.info;
+								return r(it.info);
+							}
+						}
+					} catch (e) {}
+					setTimeout(check, 500);
+				};
+				check();
+			});
+		}`
+
+	// navigate to episode
+	ep_url := fmt.Sprintf(
+		"https://kisskh.co/Drama/%s/Episode-%d?id=%d&ep=%d&page=0&pageSize=100",
+		slugify(serie_detail_json.Title),
+		int(target_ep.Number),
+		serie_detail_json.ID,
+		target_ep.ID,
+	)
+
+	// fmt.Println(ep_url)
+	page.MustNavigate(ep_url).MustWaitLoad()
+	page.Eval(sniff_js)
+	page.Eval(`() => { const v = document.querySelector('video'); if(v){v.muted=true;v.play&&v.play().catch(()=>{});} }`)
+
+	// wait for video with retry
+	video_url := ""
+	retries := 3
+
+	for i := 0; i < retries; i++ {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		ch := make(chan string, 1)
+
+		go func() {
+			defer close(ch)
+
+			val, err := page.Eval(`() => window.waitForVideo`)
+			if err != nil {
+				fmt.Println("Eval error:", err)
+				return
+			}
+
+			obj := val.Value.Map()
+			url_json, ok := obj["url"]
+			if !ok {
+				return
+			}
+
+			url_str := url_json.Str()
+			if url_str != "" {
+				select {
+				case ch <- url_str:
+				default:
+				}
+			}
+		}()
+
+		select {
+		case <-ctx.Done():
+			fmt.Println("⏱ Timeout scraping video for episode", ep_num, "retry", i+1)
+		case url := <-ch:
+			video_url = url
+			fmt.Println("✅ Found video:", video_url)
+		}
+
+		cancel()
+
+		if video_url != "" {
+			break
+		}
+	}
+
+	if video_url == "" {
+		err_msg := &responses.ErrorResponse{}
+		return nil, err_msg.NewErrorResponse(
+			"scraping_failed",
+			fmt.Errorf("no video found for episode %d", ep_num),
+		)
+	}
+
+	// prepare proxy URL
+	host := os.Getenv("API_HOST")
+	port := utils.GetenvInt("API_PORT", 8585)
+	proxy_base := fmt.Sprintf("http://%s:%d", host, port)
+
+	mime := getMimeFromURL(video_url)
+	var proxy_video string
+	if strings.Contains(video_url, ".m3u8") || mime == "application/vnd.apple.mpegurl" {
+		trimmed := strings.TrimPrefix(video_url, "https://")
+		trimmed = strings.TrimPrefix(trimmed, "http://")
+		proxy_video = fmt.Sprintf("%s/m3u8/%s", proxy_base, trimmed)
+	} else if strings.Contains(video_url, ".mp4") || mime == "video/mp4" {
+		proxy_video = fmt.Sprintf("%s/mp4?url=%s", proxy_base, url.QueryEscape(ep_url))
+	} else {
+		proxy_video = video_url
+	}
+
+	// fetch subtitles
+	subtitles := []serie.Subtitle{}
+	val, err := page.Eval(`() => window.__sub_found ? window.__sub_found.url : null`)
+	if err == nil && val.Value.Str() != "" {
+		sub_url := "https://kisskh.co" + val.Value.Str()
+		req_sub, _ := http.NewRequest("GET", sub_url, nil)
+		req_sub.Header.Set("User-Agent", "Mozilla/5.0")
+		req_sub.Header.Set("Referer", fmt.Sprintf("https://kisskh.co/Drama/%s", slugify(serie_detail_json.Title)))
+		req_sub.Header.Set("Cookie", cookie_str.String())
+
+		if resp_sub, err := client.Do(req_sub); err == nil {
+			defer resp_sub.Body.Close()
+			sub_body, _ := io.ReadAll(resp_sub.Body)
+			var subs_json []serie.SubtitleJSON
+			if json.Unmarshal(sub_body, &subs_json) == nil {
+				subs := make([]serie.Subtitle, len(subs_json))
+				for j, sub := range subs_json {
+					trimmed := strings.TrimPrefix(sub.Src, "https://")
+					trimmed = strings.TrimPrefix(trimmed, "http://")
+					subs[j] = serie.Subtitle{
+						Src:     fmt.Sprintf("%s/subtitle/%s", proxy_base, trimmed),
+						Label:   sub.Label,
+						Lang:    sub.Lang,
+						Default: sub.Default,
+					}
+				}
+				subtitles = subs
+			}
+		}
+	}
+
+	return &EpisodesResponse{
+		Episodes: []serie.EpisodeDeep{
+			{
+				ID:        target_ep.ID,
+				SeriesID:  key,
+				Number:    target_ep.Number,
+				Sub:       target_ep.Sub,
+				Source:    proxy_video,
+				Subtitles: subtitles,
+			},
 		},
 	}, nil
 }
 
-func (sc *ScrapingRepoImpl) Seed() {
+func getMimeFromURL(u string) string {
+	if strings.Contains(u, ".m3u8") {
+		return "application/vnd.apple.mpegurl"
+	}
+	if strings.Contains(u, ".mp4") {
+		return "video/mp4"
+	}
+	return ""
+}
+
+func (sc *ScrapingRepoImpl) Seed() []serie.SerieDeepDetail {
 	series_key := []int{
 		// korean drama
-		975, 10124, 3749, 7555, 4596, //41, 5043, 5941, 124, 126,
+		//975, 10124, 3749, 7555, 4596, 41, 5043, 5941, 124, 126,
 
 		// chinese drama
 		//10826, 8316, 6158, 9148, 773, 9579, 7949, 7628, 10958, 7532,
 
 		// hollywood
-		//11698, 11764, 11694, 11739, 11521, 11526, 11706, 11705, 11674, 11652,
+		11698, 11764, 11694, 11739, 11521, 11526, 11706, 11705, 11674, 11652,
 	}
 
-	var series_deep_detail []SerieDeepDetail
-
-	// 🌱 Initialize progress bar
-	bar := progressbar.NewOptions(len(series_key),
-		progressbar.OptionSetDescription("Scraping series..."),
-		progressbar.OptionShowCount(),
-		progressbar.OptionSetWidth(30),
-		progressbar.OptionShowElapsedTimeOnFinish(),
-		progressbar.OptionSetTheme(progressbar.Theme{
-			Saucer:        "█",
-			SaucerHead:    ">",
-			SaucerPadding: " ",
-			BarStart:      "[",
-			BarEnd:        "]",
-		}),
-	)
-
-	start := time.Now()
-	success := 0
-	fail := 0
+	var series_deep_detail []serie.SerieDeepDetail
 
 	for _, key := range series_key {
-		resp, err := sc.GetDeepDetail(fmt.Sprintf("%d", key))
+		resp, err := sc.GetDetail(fmt.Sprintf("%d", key))
 		if err != nil {
-			color.Red("❌ Failed scraping series %d: %v", key, err)
-			fail++
-			bar.Add(1)
 			continue
 		}
-		success++
-		bar.Add(1)
-		color.Green("✅ Scraped series ID: %d (%d episodes)", key, len(resp.SeriesDeepDetails))
 		series_deep_detail = append(series_deep_detail, resp.SeriesDeepDetails...)
 	}
 
-	// Begin DB transaction
-	tx, err := sc.DBPool.Beginx()
-	if err != nil {
-		color.Red("❌ Failed to start transaction: %v", err)
-		return
-	}
-
-	color.Yellow("\n💾 Inserting data into database...")
-
-	insertBar := progressbar.NewOptions(len(series_deep_detail),
-		progressbar.OptionSetDescription("Inserting series..."),
-		progressbar.OptionSetWidth(30),
-		progressbar.OptionSetTheme(progressbar.Theme{
-			Saucer:        "█",
-			SaucerHead:    ">",
-			SaucerPadding: " ",
-			BarStart:      "[",
-			BarEnd:        "]",
-		}),
-	)
-
-	for _, serie := range series_deep_detail {
-		_, err := tx.NamedExec(`
-			INSERT INTO series 
-				(id, title, description, release_date, trailer, country, status, type, next_ep_date_id,
-				episodes_count, label, favorite_id, thumbnail)
-			VALUES 
-				(:id, :title, :description, :release_date, :trailer, :country, :status, :type, :next_ep_date_id,
-				:episodes_count, :label, :favorite_id, :thumbnail)
-			ON CONFLICT (id) DO NOTHING
-		`, map[string]interface{}{
-			"id":              serie.ID,
-			"title":           serie.Title,
-			"description":     serie.Description,
-			"release_date":    serie.ReleaseDate,
-			"trailer":         serie.Trailer,
-			"country":         serie.Country,
-			"status":          serie.Status,
-			"type":            serie.Type,
-			"next_ep_date_id": serie.NextEpDateID,
-			"episodes_count":  serie.EpisodesCount,
-			"label":           serie.Label,
-			"favorite_id":     serie.FavoriteID,
-			"thumbnail":       serie.Thumbnail,
-		})
-
-		if err != nil {
-			color.Red("❌ [line 430] Failed to insert series %d: %v", serie.ID, err)
-			tx.Rollback()
-			return
-		}
-
-		for _, ep := range serie.Episodes {
-			_, err := tx.NamedExec(`
-				INSERT INTO episodes (id, series_id, number, sub, src)
-					VALUES (:id, :series_id, :number, :sub, :src)
-				ON CONFLICT (id) DO NOTHING
-			`, map[string]interface{}{
-				"id":        ep.ID,
-				"series_id": serie.ID,
-				"number":    ep.Number,
-				"sub":       ep.Sub,
-				"src":       ep.Source,
-			})
-			if err != nil {
-				color.Red("❌[line 448] Failed inserting episode %d of series %d: %v", ep.ID, serie.ID, err)
-				tx.Rollback()
-				return
-			}
-
-			for _, sub := range ep.Subtitles {
-				_, err := tx.NamedExec(`
-					INSERT INTO subtitles (episode_id, src, label, lang, is_default)
-					VALUES (:episode_id, :src, :label, :lang, :is_default)
-				`, map[string]interface{}{
-					"episode_id": ep.ID,
-					"src":        sub.Src,
-					"label":      sub.Label,
-					"lang":       sub.Lang,
-					"is_default": sub.Default,
-				})
-				if err != nil {
-					color.Red("❌ [line 465] Failed inserting subtitle for episode %d: %v", ep.ID, err)
-					tx.Rollback()
-					return
-				}
-			}
-		}
-		insertBar.Add(1)
-	}
-
-	if err := tx.Commit(); err != nil {
-		color.Red("❌ Transaction commit failed: %v", err)
-		return
-	}
-
-	duration := time.Since(start)
-	color.Cyan("\n🎬 Seeding complete in %v", duration)
-	color.Green("✅ Scraped: %d | Failed: %d", success, fail)
-	color.Yellow("💾 Series inserted: %d", len(series_deep_detail))
+	return series_deep_detail
 }
 
 func slugify(title string) string {
@@ -492,307 +975,3 @@ func slugify(title string) string {
 
 	return slug
 }
-
-// for khfullhd
-// func (au *AuthHandler) ScrapingDetail(c *fiber.Ctx) error {
-// 	targetURL := c.Query("url")
-// 	if targetURL == "" {
-// 		return c.Status(http.StatusBadRequest).SendString("missing url")
-// 	}
-
-// 	ctx, cancel := context.WithTimeout(c.Context(), 90*time.Second)
-// 	defer cancel()
-
-// 	result := make(map[string]interface{})
-
-// 	mainCollector := colly.NewCollector(
-// 		colly.Async(true),
-// 		colly.MaxDepth(2),
-// 	)
-// 	mainCollector.SetRequestTimeout(10 * time.Second)
-
-// 	// Debug
-// 	mainCollector.OnRequest(func(r *colly.Request) {
-// 		fmt.Println("Visiting:", r.URL.String())
-// 	})
-
-// 	// Cover
-// 	mainCollector.OnHTML("#content-cover", func(e *colly.HTMLElement) {
-// 		bg := e.Attr("style")
-// 		re := regexp.MustCompile(`url\((.*?)\)`)
-// 		if match := re.FindStringSubmatch(bg); len(match) > 1 {
-// 			result["cover"] = match[1]
-// 		}
-// 	})
-
-// 	// Poster
-// 	mainCollector.OnHTML(".thumb.mvic-thumb img", func(e *colly.HTMLElement) {
-// 		result["poster"] = e.Attr("src")
-// 	})
-
-// 	// Description
-// 	mainCollector.OnHTML(".mvic-desc .desc", func(e *colly.HTMLElement) {
-// 		result["description"] = strings.TrimSpace(e.Text)
-// 	})
-
-// 	// Genres + Actors
-// 	mainCollector.OnHTML(".mvici-left p", func(e *colly.HTMLElement) {
-// 		label := strings.TrimSpace(e.ChildText("strong"))
-
-// 		if strings.Contains(label, "Genre") {
-// 			var genres []string
-// 			e.ForEach("a", func(_ int, el *colly.HTMLElement) {
-// 				genres = append(genres, strings.TrimSpace(el.Text))
-// 			})
-// 			result["genres"] = genres
-// 		}
-
-// 		if strings.Contains(label, "Actors") {
-// 			var actors []string
-// 			e.ForEach("a", func(_ int, el *colly.HTMLElement) {
-// 				actors = append(actors, strings.TrimSpace(el.Text))
-// 			})
-// 			result["actors"] = actors
-// 		}
-// 	})
-
-// 	// Studio
-// 	mainCollector.OnHTML(".mvici-left p:contains('Studio') a", func(e *colly.HTMLElement) {
-// 		result["studio"] = e.Text
-// 	})
-
-// 	// Duration
-// 	mainCollector.OnHTML(".mvici-right p:contains('Duration') span", func(e *colly.HTMLElement) {
-// 		result["duration"] = e.Text
-// 	})
-
-// 	// Release
-// 	mainCollector.OnHTML(".mvici-right p:contains('Release') a", func(e *colly.HTMLElement) {
-// 		result["release"] = e.Text
-// 	})
-
-// 	// Seasons + Episodes
-// 	var seasons []map[string]interface{}
-// 	mainCollector.OnHTML(".tvseason", func(e *colly.HTMLElement) {
-// 		season := map[string]interface{}{
-// 			"title":    e.ChildText(".les-title strong"),
-// 			"episodes": []map[string]interface{}{},
-// 		}
-
-// 		e.ForEach(".les-content a", func(_ int, ep *colly.HTMLElement) {
-// 			epData := map[string]interface{}{
-// 				"title":    strings.TrimSpace(ep.Text),
-// 				"link":     ep.Attr("href"),
-// 				"iframe":   "",
-// 				"playlist": []map[string]interface{}{},
-// 			}
-
-// 			// Get iframe link from episode page
-// 			epCollector := colly.NewCollector()
-// 			epCollector.OnHTML(".movieplay iframe", func(iframe *colly.HTMLElement) {
-// 				epData["iframe"] = iframe.Attr("src")
-// 			})
-// 			epCollector.Visit(ep.Attr("href"))
-
-// 			// Inside your ScrapingDetail function, when fetching the iframe:
-// 			if iframeURL, ok := epData["iframe"].(string); ok && iframeURL != "" {
-// 				// Pass the episode page URL as a query parameter to your proxy
-// 				proxyURL := fmt.Sprintf("%s/proxy/%s?referer=%s",
-// 					c.BaseURL(),
-// 					strings.TrimPrefix(iframeURL, "https://stream.khfullhd.co/"),
-// 					url.QueryEscape(ep.Attr("href")), // correct usage
-// 				)
-
-// 				resp, err := http.Get(proxyURL)
-// 				if err != nil {
-// 					fmt.Println("proxy request error:", err)
-// 					return
-// 				}
-// 				defer resp.Body.Close()
-
-// 				bodyBytes, _ := io.ReadAll(resp.Body)
-// 				body := string(bodyBytes)
-// 				fmt.Println("response body : ", body)
-
-// 				// Parse JWPlayer playlist
-// 				re := regexp.MustCompile(`var\s+playlist\s*=\s*(\[.*?\]);`)
-// 				match := re.FindStringSubmatch(body)
-// 				if len(match) > 1 {
-// 					var playlist []map[string]interface{}
-// 					if err := json.Unmarshal([]byte(match[1]), &playlist); err == nil && len(playlist) > 0 {
-// 						var enriched []map[string]interface{}
-// 						for _, p := range playlist {
-// 							epBlock := map[string]interface{}{
-// 								"thumbnail": p["image"],
-// 							}
-
-// 							// Rewrite HLS and subtitle URLs to go through your proxy
-// 							if sources, ok := p["sources"].([]interface{}); ok {
-// 								var videoSources []map[string]interface{}
-// 								for _, s := range sources {
-// 									if src, ok := s.(map[string]interface{}); ok {
-// 										file := src["file"].(string)
-// 										if strings.HasPrefix(file, "https://stream.khanime.co/") {
-// 											// Fetch the master m3u8 playlist
-// 											resp, err := http.Get(file)
-// 											if err != nil {
-// 												continue
-// 											}
-// 											body, _ := io.ReadAll(resp.Body)
-// 											resp.Body.Close()
-
-// 											// Parse resolutions from m3u8
-// 											reRes := regexp.MustCompile(`#EXT-X-STREAM-INF:.*RESOLUTION=(\d+x\d+)\s+([^\s]+)`)
-// 											matches := reRes.FindAllStringSubmatch(string(body), -1)
-
-// 											if len(matches) > 0 {
-// 												// Build sources for each resolution
-// 												for _, m := range matches {
-// 													resLabel := m[1] // "1280x720"
-// 													resURL := m[2]   // "/w/hlsplaylist/10583/.../720"
-// 													if strings.HasPrefix(resURL, "/") {
-// 														resURL = c.BaseURL() + "/video-proxy" + resURL + "?referer=" + url.QueryEscape(ep.Attr("href"))
-// 													}
-// 													videoSources = append(videoSources, map[string]interface{}{
-// 														"file":    resURL,
-// 														"label":   resLabel,
-// 														"default": resLabel == "1280x720", // optional default
-// 														"type":    "hls",
-// 													})
-// 												}
-// 											} else {
-// 												// fallback if no sub-playlists, just use original file
-// 												videoSources = append(videoSources, map[string]interface{}{
-// 													"file":    c.BaseURL() + "/video-proxy/" + strings.TrimPrefix(file, "https://stream.khanime.co/") + "?referer=" + url.QueryEscape(ep.Attr("href")),
-// 													"label":   "auto",
-// 													"default": true,
-// 													"type":    "hls",
-// 												})
-// 											}
-// 										}
-// 									}
-// 								}
-// 								epBlock["sources"] = videoSources
-// 							}
-
-// 							if tracks, ok := p["tracks"].([]interface{}); ok {
-// 								var subtitles []map[string]interface{}
-// 								for _, t := range tracks {
-// 									if tr, ok := t.(map[string]interface{}); ok {
-// 										file := tr["file"].(string)
-// 										if strings.HasPrefix(file, "https://stream.khanime.co/") {
-// 											file = strings.Replace(file, "https://stream.khanime.co/", c.BaseURL()+"/video-proxy/", 1)
-// 										}
-// 										subtitles = append(subtitles, map[string]interface{}{
-// 											"file":  file,
-// 											"label": tr["label"],
-// 											"kind":  tr["kind"],
-// 										})
-// 									}
-// 								}
-// 								epBlock["subtitles"] = subtitles
-// 							}
-
-// 							enriched = append(enriched, epBlock)
-// 						}
-// 						epData["playlist"] = enriched
-// 					}
-// 				}
-// 			}
-
-// 			season["episodes"] = append(season["episodes"].([]map[string]interface{}), epData)
-// 		})
-
-// 		seasons = append(seasons, season)
-// 	})
-
-// 	mainCollector.Visit(targetURL)
-// 	mainCollector.Wait()
-// 	result["seasons"] = seasons
-
-// 	select {
-// 	case <-ctx.Done():
-// 		return c.Status(http.StatusRequestTimeout).SendString("scraping timed out")
-// 	default:
-// 		return c.JSON(result)
-// 	}
-// }
-
-// for khfullhd
-// func (au *AuthHandler) ScrapingSearch(c *fiber.Ctx) error {
-// 	keyword := c.Query("q")
-// 	if keyword == "" {
-// 		return c.Status(http.StatusBadRequest).SendString("missing keyword")
-// 	}
-
-// 	var results []map[string]string
-// 	scraper := colly.NewCollector()
-
-// 	// Each movie/series item
-// 	scraper.OnHTML(".movies-list-full .ml-item", func(e *colly.HTMLElement) {
-// 		link := e.ChildAttr("a.ml-mask", "href")
-// 		title := e.ChildText("h2")
-// 		img := e.ChildAttr("img", "data-original")
-// 		if img == "" {
-// 			img = e.ChildAttr("img", "src")
-// 		}
-
-// 		results = append(results, map[string]string{
-// 			"link":  link,
-// 			"title": title,
-// 			"image": img,
-// 		})
-// 	})
-
-// 	searchURL := "https://khfullhd.co/?" + url.Values{
-// 		"s": {keyword},
-// 	}.Encode()
-
-// 	if err := scraper.Visit(searchURL); err != nil {
-// 		return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
-// 	}
-
-// 	return c.JSON(results)
-// }
-
-// func (au *AuthHandler) Scraping(c *fiber.Ctx) error {
-// 	var baseURL = c.Query("url")
-// 	if baseURL == "" {
-// 		return c.Status(http.StatusBadRequest).SendString("missing url")
-// 	}
-
-// 	var results []map[string]string
-
-// 	episodeListScraper := colly.NewCollector()
-
-// 	episodePageScraper := episodeListScraper.Clone()
-
-// 	episodePageScraper.OnHTML("div.watch_video.watch-iframe iframe", func(e *colly.HTMLElement) {
-// 		videoSrc := e.Attr("src")
-
-// 		if strings.HasPrefix(videoSrc, "//") {
-// 			videoSrc = "https:" + videoSrc
-// 		}
-
-// 		results = append(results, map[string]string{
-// 			"title":     e.Request.Ctx.Get("title"),
-// 			"link":      e.Request.URL.String(),
-// 			"video_src": videoSrc,
-// 		})
-// 	})
-
-// 	episodeListScraper.OnHTML("ul.list-episode-item-2.all-episode li a", func(e *colly.HTMLElement) {
-// 		epLink := e.Request.AbsoluteURL(e.Attr("href"))
-// 		epTitle := strings.TrimSpace(e.ChildText("h3.title"))
-
-// 		ctx := colly.NewContext()
-// 		ctx.Put("title", epTitle)
-// 		episodePageScraper.Request("GET", epLink, nil, ctx, nil)
-// 	})
-
-// 	if err := episodeListScraper.Visit(baseURL); err != nil {
-// 		return c.Status(fiber.StatusInternalServerError).SendString(err.Error())
-// 	}
-
-// 	return c.Status(http.StatusOK).JSON(results)
-// }

@@ -34,7 +34,7 @@ func main() {
 	fmt.Println("✅ Connected to database successfully")
 
 	// 3️⃣ Create the repo instance
-	scraping := scraping.NewScrapingRepoImpl(db, &share.UserContext{})
+	scraping := scraping.NewScrapingService(db, &share.UserContext{})
 
 	// 4️⃣ Run seeding process
 	scraping.Seed()

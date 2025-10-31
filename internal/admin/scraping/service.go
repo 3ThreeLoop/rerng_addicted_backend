@@ -1,6 +1,9 @@
 package scraping
 
 import (
+	"fmt"
+	"rerng_addicted_api/internal/admin/serie"
+	custom_log "rerng_addicted_api/pkg/logs"
 	types "rerng_addicted_api/pkg/model"
 	"rerng_addicted_api/pkg/responses"
 
@@ -9,8 +12,10 @@ import (
 
 type ScrapingServiceCreator interface {
 	Search(keyword string) (*SeriesResponse, *responses.ErrorResponse)
-	GetDetail(key string) (*SeriesDetailsResponse, *responses.ErrorResponse)
-	GetDeepDetail(key string) (*SeriesDeepDetailsResponse, *responses.ErrorResponse)
+	ViewDetail(key string) (*SeriesDetailsResponse, *responses.ErrorResponse)
+	GetDetail(key string) (*SeriesDeepDetailsResponse, *responses.ErrorResponse)
+	GetEpisodes(key int, ep_num int) (*EpisodesResponse, *responses.ErrorResponse)
+	Seed()
 }
 
 type ScrapingService struct {
@@ -30,10 +35,36 @@ func (sc *ScrapingService) Search(keyword string) (*SeriesResponse, *responses.E
 	return sc.ScrapingRepo.Search(keyword)
 }
 
-func (sc *ScrapingService) GetDetail(key string) (*SeriesDetailsResponse, *responses.ErrorResponse) {
+func (sc *ScrapingService) ViewDetail(key string) (*SeriesDetailsResponse, *responses.ErrorResponse) {
+	return sc.ScrapingRepo.ViewDetail(key)
+}
+
+func (sc *ScrapingService) GetDetail(key string) (*SeriesDeepDetailsResponse, *responses.ErrorResponse) {
 	return sc.ScrapingRepo.GetDetail(key)
 }
 
-func (sc *ScrapingService) GetDeepDetail(key string) (*SeriesDeepDetailsResponse, *responses.ErrorResponse) {
-	return sc.ScrapingRepo.GetDeepDetail(key)
+func (sc *ScrapingService) GetEpisodes(key int, ep_num int) (*EpisodesResponse, *responses.ErrorResponse) {
+	resp, err := sc.ScrapingRepo.GetEpisodes(key, ep_num)
+
+	if err == nil && len(resp.Episodes) > 0 {
+		serie_repo := serie.NewSerieRepoImpl(sc.DBPool, sc.UserContext)
+		if insert_err := serie_repo.InsertEpisode(sc.DBPool, key, resp.Episodes[0]); insert_err != nil {
+			custom_log.NewCustomLog("scraping_failed", insert_err.Error(), "error")
+			return nil, (&responses.ErrorResponse{}).NewErrorResponse("scraping_failed", fmt.Errorf("database_error"))
+		}
+	}
+
+	return resp, err
+}
+
+func (sc *ScrapingService) Seed() {
+	series := sc.ScrapingRepo.Seed()
+	serie_repo := serie.NewSerieRepoImpl(sc.DBPool, sc.UserContext)
+	for _, serie := range series {
+		_, err := serie_repo.Create(serie)
+		if err != nil {
+			fmt.Println("Error Inserting Data : ", err.Err)
+		}
+	}
+
 }

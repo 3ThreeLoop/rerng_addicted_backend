@@ -25,8 +25,9 @@ func (sc *ScrapingRoute) RegisterScrapingRoute() *ScrapingRoute {
 	scraping := sc.App.Group("/api/v1/admin/scraping")
 
 	scraping.Get("/search", middlewares.NewJwtMiddleware(sc.DBPool), sc.ScrapingHandler.Search)
-	scraping.Get("/detail/:key", middlewares.NewJwtMiddleware(sc.DBPool), sc.ScrapingHandler.GetDetail)
-	scraping.Get("/deep/detail/:key", middlewares.NewJwtMiddleware(sc.DBPool), sc.ScrapingHandler.GetDeepDetail)
+	scraping.Get("/series/:key", middlewares.NewJwtMiddleware(sc.DBPool), sc.ScrapingHandler.ViewDetail)
+	scraping.Get("/series/:key/detail", sc.ScrapingHandler.GetDetail)
+	scraping.Get("/series/:key/episode/:ep", sc.ScrapingHandler.GetEpisode)
 
 	return sc
 }

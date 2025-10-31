@@ -1,11 +1,13 @@
 -- +goose Up
 CREATE TABLE IF NOT EXISTS tbl_episodes (
     id BIGINT PRIMARY KEY,
-    series_id BIGINT NOT NULL REFERENCES series(id) ON DELETE CASCADE,
+    series_id BIGINT NOT NULL,
     number NUMERIC(5,2) NOT NULL,
     sub INT DEFAULT 0,
     src VARCHAR(500) NOT NULL,
 
+    status_id INTEGER NOT NULL DEFAULT 1,
+    "order" INTEGER DEFAULT 1,
     created_at TIMESTAMP DEFAULT NOW(),
     created_by BIGINT,
     updated_at TIMESTAMP,

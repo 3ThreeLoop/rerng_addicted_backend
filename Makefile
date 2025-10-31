@@ -15,7 +15,7 @@ up:
 
 # Rollback one step
 down:
-	goose -dir $(MIGRATIONS_DIR) postgres "$(DATABASE_URL)" down 
+	goose -dir $(MIGRATIONS_DIR) postgres "$(DATABASE_URL)" down 1
 
 # Redo last migration
 redo:
